@@ -1,46 +1,42 @@
 import os
+import json
+from http.server import BaseHTTPRequestHandler
+import aiohttp
 import asyncio
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.client.default import DefaultBotProperties
-from google import genai
 
-# Берем токены из переменных окружения (которые ты потом вставишь в Render)
 TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-# Инициализация бота
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-dp = Dispatcher()
+async def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json={"chat_id": chat_id, "text": text})
 
-# Инициализация Gemini (используем модель 2.0 Flash — она умная и быстрая)
-client = genai.Client(api_key=GEMINI_KEY)
-MODEL_ID = "gemini-2.0-flash" 
+async def ask_gemini(text):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json={"contents": [{"parts": [{"text": text}]}]}) as resp:
+            data = await resp.json()
+            try:
+                return data['candidates'][0]['content']['parts'][0]['text']
+            except:
+                return "Ошибка генерации ответа."
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я AI-бот на базе Gemini. Напиши мне любой вопрос, и я отвечу! 🧠")
-
-@dp.message(F.text)
-async def handle_message(message: types.Message):
-    # Показываем, что бот "печатает"
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    try:
-        # Отправляем запрос в Gemini
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=message.text
-        )
-        # Отправляем ответ (Telegram не принимает сообщения длиннее 4096 символов)
-        await message.answer(response.text[:4000])
-    except Exception as e:
-        # Если что-то пошло не так (например, закончился лимит), бот напишет ошибку
-        await message.answer(f"❌ Ошибка: {e}")
-
-async def main():
-    print("Бот запущен...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        update = json.loads(post_data)
+        
+        if "message" in update and "text" in update["message"]:
+            chat_id = update["message"]["chat"]["id"]
+            text = update["message"]["text"]
+            
+            # Запускаем асинхронно, чтобы Vercel не выдал таймаут
+            asyncio.run(send_message(chat_id, "Думаю..."))
+            reply = asyncio.run(ask_gemini(text))
+            asyncio.run(send_message(chat_id, reply))
+            
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
